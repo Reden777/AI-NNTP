@@ -17,7 +17,7 @@ One single binary.
 
 Language: Go
 
-License: Tbd, please do not create one until later.
+License: CC0
 
 ## Run
 
