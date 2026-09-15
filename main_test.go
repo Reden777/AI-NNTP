@@ -3,9 +3,12 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"io"
 	"log"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -97,6 +100,66 @@ func TestDotReaderUnstuffs(t *testing.T) {
 	}
 	if string(b) != "one\r\n.two\r\n" {
 		t.Fatalf("got %q", b)
+	}
+}
+
+func TestIntegratedReader(t *testing.T) {
+	db, err := openStore(filepath.Join(t.TempDir(), "articles.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeCompletion{calls: make(chan []chatMessage, 1)}
+	s := &server{store: db, ai: fake, model: "test/model", logger: log.New(io.Discard, "", 0)}
+	ts := httptest.NewServer(s.webHandler())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	home, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(home), "AI·NNTP") {
+		t.Fatalf("home: %d %q", resp.StatusCode, home)
+	}
+
+	payload := `{"name":"Alice","subject":"From the web","body":"Hello from the reader","replyTo":""}`
+	resp, err = http.Post(ts.URL+"/api/posts", "application/json", strings.NewReader(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var created map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated || created["messageId"] == "" {
+		t.Fatalf("create: %d %#v", resp.StatusCode, created)
+	}
+
+	select {
+	case messages := <-fake.calls:
+		if messages[len(messages)-1].Content != "Hello from the reader" {
+			t.Fatalf("messages = %#v", messages)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("completion was not requested")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for len(db.snapshot()) != 2 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	resp, err = http.Get(ts.URL + "/api/articles")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var articles []webArticle
+	if err := json.NewDecoder(resp.Body).Decode(&articles); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if len(articles) != 2 || articles[0].ThreadID != articles[0].MessageID || articles[1].ThreadID != articles[0].MessageID || !articles[1].AI {
+		t.Fatalf("articles = %#v", articles)
 	}
 }
 

@@ -28,26 +28,31 @@ export OPENROUTER_API_KEY='your-key'
 go run .
 ```
 
-The server listens on `127.0.0.1:1119` and persists articles in
-`./data/articles.jsonl`. Point an NNTP newsreader at that address, subscribe to
-`ai.text`, and post an article. The post is accepted immediately; the generated
-reply appears as a follow-up article when OpenRouter finishes.
+Open the integrated newsreader at <http://127.0.0.1:8080>. It groups articles
+into conversations, provides tailored new-post and reply forms, and refreshes
+automatically while the model composes a response.
+
+The NNTP server remains available on `127.0.0.1:1119` for external newsreaders,
+and articles are persisted in `./data/articles.jsonl`. Both interfaces use the
+same `ai.text` group and conversation history.
 
 Configuration is available through flags or environment variables:
 
 | Flag | Environment | Default |
 | --- | --- | --- |
 | `-addr` | `AI_NNTP_ADDR` | `127.0.0.1:1119` |
+| `-web-addr` | `AI_NNTP_WEB_ADDR` | `127.0.0.1:8080` |
 | `-data` | `AI_NNTP_DATA` | `./data/articles.jsonl` |
 | `-model` | `OPENROUTER_MODEL` | `google/gemma-3-27b-it` |
 | `-openrouter-url` | `OPENROUTER_URL` | `https://openrouter.ai/api/v1` |
 
-For example, to allow LAN connections:
+For example, to allow LAN connections to both interfaces:
 
 ```sh
-go run . -addr 0.0.0.0:1119
+go run . -addr 0.0.0.0:1119 -web-addr 0.0.0.0:8080
 ```
 
 There is currently no authentication or TLS, so do not expose the listener to
-the public internet. Run tests with `go test ./...` and build the single binary
-with `go build -o ai-nntp .`.
+the public internet. Pass `-web-addr ''` to disable the integrated reader. Run
+tests with `go test ./...` and build the single binary with
+`go build -o ai-nntp .`; the web interface is embedded in that binary.

@@ -178,6 +178,8 @@ type server struct {
 	ai     completionClient
 	model  string
 	logger *log.Logger
+	jobMu  sync.RWMutex
+	jobs   map[string]string
 }
 
 func (s *server) serve(l net.Listener) error {
@@ -399,8 +401,34 @@ func (s *server) accept(raw []byte) error {
 	if err := s.store.add(a); err != nil {
 		return err
 	}
-	go s.reply(a)
+	s.queueReply(a)
 	return nil
+}
+
+func (s *server) queueReply(a *article) {
+	s.jobMu.Lock()
+	if s.jobs == nil {
+		s.jobs = make(map[string]string)
+	}
+	s.jobs[a.MessageID] = "pending"
+	s.jobMu.Unlock()
+	go s.reply(a)
+}
+
+func (s *server) replyState(messageID string) string {
+	s.jobMu.RLock()
+	defer s.jobMu.RUnlock()
+	return s.jobs[messageID]
+}
+
+func (s *server) finishReply(messageID, state string) {
+	s.jobMu.Lock()
+	defer s.jobMu.Unlock()
+	if state == "" {
+		delete(s.jobs, messageID)
+	} else {
+		s.jobs[messageID] = state
+	}
 }
 
 func (s *server) reply(post *article) {
@@ -423,6 +451,7 @@ func (s *server) reply(post *article) {
 	text, err := s.ai.Complete(ctx, messages)
 	if err != nil {
 		s.logger.Printf("AI reply to %s failed: %v", post.MessageID, err)
+		s.finishReply(post.MessageID, "failed")
 		return
 	}
 	subject := post.Header.Get("Subject")
@@ -437,7 +466,10 @@ func (s *server) reply(post *article) {
 	headerSet(a.Header, "Message-ID", a.MessageID)
 	if err := s.store.add(a); err != nil {
 		s.logger.Printf("saving AI reply failed: %v", err)
+		s.finishReply(post.MessageID, "failed")
+		return
 	}
+	s.finishReply(post.MessageID, "")
 }
 
 func roleFor(a *article) string {
@@ -520,6 +552,7 @@ func env(name, fallback string) string {
 
 func main() {
 	addr := flag.String("addr", env("AI_NNTP_ADDR", "127.0.0.1:1119"), "NNTP listen address")
+	webAddr := flag.String("web-addr", env("AI_NNTP_WEB_ADDR", "127.0.0.1:8080"), "integrated web reader listen address (empty to disable)")
 	data := flag.String("data", env("AI_NNTP_DATA", "./data/articles.jsonl"), "article database path")
 	model := flag.String("model", env("OPENROUTER_MODEL", "google/gemma-3-27b-it"), "OpenRouter model")
 	baseURL := flag.String("openrouter-url", env("OPENROUTER_URL", "https://openrouter.ai/api/v1"), "OpenRouter API base URL")
@@ -532,13 +565,27 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	l, err := net.Listen("tcp", *addr)
+	nntpListener, err := net.Listen("tcp", *addr)
 	if err != nil {
 		log.Fatal(err)
 	}
-	log.Printf("AI-NNTP listening on %s; group=%s model=%s", l.Addr(), groupName, *model)
 	s := &server{store: db, model: *model, logger: log.Default(), ai: &openRouter{key: key, model: *model, baseURL: *baseURL, http: &http.Client{Timeout: 2 * time.Minute}}}
-	if err := s.serve(l); err != nil {
+	log.Printf("AI-NNTP listening on %s; group=%s model=%s", nntpListener.Addr(), groupName, *model)
+	if *webAddr == "" {
+		if err := s.serve(nntpListener); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+	webListener, err := net.Listen("tcp", *webAddr)
+	if err != nil {
+		_ = nntpListener.Close()
 		log.Fatal(err)
 	}
+	log.Printf("integrated newsreader available at http://%s", webListener.Addr())
+	errors := make(chan error, 2)
+	go func() { errors <- s.serve(nntpListener) }()
+	webServer := &http.Server{Handler: s.webHandler(), ReadHeaderTimeout: 10 * time.Second}
+	go func() { errors <- webServer.Serve(webListener) }()
+	log.Fatal(<-errors)
 }
